@@ -1,4 +1,9 @@
-/auto_flower_contacts.csv
-/main.py
-/venv
-/~$результат_парсинга.xlsx
+venv/
+browser_profile/
+
+*.csv
+*.xlsx
+~$*.xlsx
+
+.idea/
+.vscode/
