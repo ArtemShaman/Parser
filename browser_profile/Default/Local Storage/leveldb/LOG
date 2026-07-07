@@ -1,0 +1,15 @@
+2026/07/07-14:38:11.276 37c4eb Reusing MANIFEST /Users/artemsaman/Documents/Parcer/browser_profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/07/07-14:38:11.279 37c4eb Recovering log #14
+2026/07/07-14:38:11.280 37c4eb Reusing old log /Users/artemsaman/Documents/Parcer/browser_profile/Default/Local Storage/leveldb/000014.log 
+2026/07/07-14:47:40.633 37c4ef Level-0 table #18: started
+2026/07/07-14:47:40.640 37c4ef Level-0 table #18: 24039 bytes OK
+2026/07/07-14:47:40.644 37c4ef Delete type=0 #14
+2026/07/07-14:47:40.649 37c4eb Compacting 4@0 + 1@1 files
+2026/07/07-14:47:40.657 37c4eb Generated table #19@0: 1194 keys, 316639 bytes
+2026/07/07-14:47:40.657 37c4eb Compacted 4@0 + 1@1 files => 316639 bytes
+2026/07/07-14:47:40.659 37c4eb compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/07/07-14:47:40.660 37c4eb Delete type=2 #15
+2026/07/07-14:47:40.660 37c4eb Delete type=2 #13
+2026/07/07-14:47:40.660 37c4eb Delete type=2 #10
+2026/07/07-14:47:40.660 37c4eb Delete type=2 #8
+2026/07/07-14:47:40.660 37c4eb Delete type=2 #18
