@@ -21,7 +21,7 @@ window.navigator.permissions.query = (parameters) => (
 
 PROFILE_DIR = "./browser_profile"  # тут будут куки и т.п., чтоб не логиниться каждый раз заново
 
-CITIES = ["минск", "брест", "гродно", "могилев", "витебск", "гомель"]
+CITIES = ["минск", "брест", "гродно", "могилев", "витебск", "гомель", "барановичи"]
 # можно добавить остальные, но пока хватает и этих
 # "бобруйск", "барановичи", "пинск", "орша", "мозырь", "солигорск"
 
@@ -30,7 +30,7 @@ QUERY_TEMPLATES = ["купить цветы {city}"]
 
 SEARCH_QUERIES = [tpl.format(city=c) for c in CITIES for tpl in QUERY_TEMPLATES]
 
-PAGES_PER_QUERY = 1  # больше 1-2 лучше не ставить, капча вылезает быстро
+PAGES_PER_QUERY = 2  # больше 1-2 лучше не ставить, капча вылезает быстро
 
 IGNORE_DOMAINS = [
     'yandex', 'google', 'instagram', 'vk.com', 'facebook', 'youtube',
@@ -75,13 +75,30 @@ def act_like_human(page):
         pass
 
 
+def decode_domain(domain):
+    # punycode (xn--...) превращаем обратно в читаемый вид, например
+    # xn--c1ac1acci.xn--g1anf0c.xn--90ais -> гродно.розы.бел
+    parts = domain.split('.')
+    result = []
+    for part in parts:
+        if part.startswith('xn--'):
+            try:
+                part = part.encode('ascii').decode('idna')
+            except Exception:
+                pass  # не смогли раскодировать - оставляем как было
+        result.append(part)
+    return '.'.join(result)
+
+
 def collect_links_for_query(page, query):
     found = set()
 
     for p_num in range(PAGES_PER_QUERY + 1):
         url = f"https://yandex.by/search/?text={query}&p={p_num}"
         try:
-            page.goto(url, timeout=30000)
+            # ждём только готовности разметки (domcontentloaded), а не полной
+            # загрузки страницы (load) - у яндекса куча фоновых запросов
+            page.goto(url, timeout=30000, wait_until='domcontentloaded')
 
             if "smartcaptcha" in page.content().lower() or page.locator('form[action*="checkcaptcha"]').count() > 0:
                 print("капча от яндекса, реши руками и подожди пока выдача не появится...")
@@ -98,10 +115,12 @@ def collect_links_for_query(page, query):
                 if not href or not href.startswith('http'):
                     continue
                 parsed = urlparse(href)
-                domain = parsed.netloc.replace('www.', '')
+                domain = parsed.netloc.replace('www.', '').lower()
                 if not domain or any(bad in domain for bad in IGNORE_DOMAINS):
                     continue
-                found.add(f"{parsed.scheme}://{domain}")
+                # в found храним только сам домен, без схемы (http/https) -
+                # так один и тот же сайт не попадёт дважды из-за разных ссылок на него
+                found.add(domain)
 
         except Exception as e:
             print(f"страница {p_num} по запросу '{query}' не открылась: {e}")
@@ -111,15 +130,60 @@ def collect_links_for_query(page, query):
     return found
 
 
-def find_phone_email(page):
-    phone = email = None
+def normalize_phone(raw):
+    # приводим любой номер к единому виду: 375XXYYYYYYY (12 цифр, без + и пробелов)
+    if not raw:
+        return None
+
+    digits = re.sub(r'\D', '', raw)
+
+    if digits.startswith('375') and len(digits) == 12:
+        return digits
+
+    if digits.startswith('80') and len(digits) == 11:
+        return '375' + digits[2:]
+
+    if digits.startswith('0') and len(digits) == 10:
+        return '375' + digits[1:]
+
+    if len(digits) == 9:
+        return '375' + digits
+
+    return None  # не похоже на нормальный белорусский номер - пропускаем
+
+
+def find_all_phones(page):
+    # собираем ВСЕ номера на странице, а не только первый попавшийся
+    phones = []
+    seen = set()
 
     try:
-        tel_links = page.locator('a[href^="tel:"]').all()
-        if tel_links:
-            phone = tel_links[0].get_attribute('href').replace('tel:', '').strip()
+        for link in page.locator('a[href^="tel:"]').all():
+            href = link.get_attribute('href')
+            if not href:
+                continue
+            phone = normalize_phone(href.replace('tel:', ''))
+            if phone and phone not in seen:
+                phones.append(phone)
+                seen.add(phone)
     except Exception:
         pass
+
+    try:
+        html = page.content()
+        for raw in re.findall(PHONE_RE, html):
+            phone = normalize_phone(raw)
+            if phone and phone not in seen:
+                phones.append(phone)
+                seen.add(phone)
+    except Exception:
+        pass
+
+    return phones
+
+
+def find_email(page):
+    email = None
 
     try:
         mail_links = page.locator('a[href^="mailto:"]').all()
@@ -128,22 +192,16 @@ def find_phone_email(page):
     except Exception:
         pass
 
-    # не нашли по ссылкам - пробуем регуляркой по всему html
-    if not phone or not email:
+    if not email:
         try:
             html = page.content()
-            if not phone:
-                m = re.search(PHONE_RE, html)
-                if m:
-                    phone = m.group(0).strip()
-            if not email:
-                m = re.search(EMAIL_RE, html)
-                if m:
-                    email = m.group(0).strip()
+            m = re.search(EMAIL_RE, html)
+            if m:
+                email = m.group(0).strip()
         except Exception:
             pass
 
-    return phone, email
+    return email
 
 
 def find_contacts_link(page):
@@ -158,31 +216,37 @@ def find_contacts_link(page):
 
 
 def get_contacts(page, base_url):
-    phone, email = find_phone_email(page)
-    if phone and email:
-        return phone, email
+    phones = find_all_phones(page)
+    email = find_email(page)
+
+    if phones and email:
+        return phones, email
 
     link = find_contacts_link(page)
     if not link:
-        return phone or "Не найден", email or "Не найден"
+        return phones, email
 
     try:
         target = link if link.startswith('http') else base_url.rstrip('/') + '/' + link.lstrip('/')
         page.goto(target, timeout=15000, wait_until='domcontentloaded')
         page.wait_for_timeout(1500)
-        p2, e2 = find_phone_email(page)
-        phone = phone or p2
-        email = email or e2
+
+        for phone in find_all_phones(page):
+            if phone not in phones:
+                phones.append(phone)
+
+        if not email:
+            email = find_email(page)
     except Exception:
         pass
 
-    return phone or "Не найден", email or "Не найден"
+    return phones, email
 
 
 def append_row(filename, row, header=False):
     mode = 'w' if header else 'a'
     with open(filename, mode=mode, encoding='utf-8-sig', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=['Сайт', 'Телефон', 'Email'], delimiter=';')
+        w = csv.DictWriter(f, fieldnames=['Сайт', 'Телефоны', 'Email'], delimiter=';')
         if header:
             w.writeheader()
         if row is not None:
@@ -194,7 +258,7 @@ def main():
 
     with sync_playwright() as p:
         # постоянный профиль - куки и локальное хранилище сохраняются между запусками,
-        # ведет себя больше как обычный юзер, а не голый запуск браузера каждый раз
+        # ведет себя больше как обычный челк, а не голый запуск браузера каждый раз
         context = p.chromium.launch_persistent_context(
             PROFILE_DIR,
             headless=False,
@@ -228,16 +292,31 @@ def main():
         print("этап 2 - собираю телефоны и почты")
         append_row(OUTPUT_CSV, None, header=True)
 
-        for i, url in enumerate(sites, start=1):
-            print(f"[{i}/{len(sites)}] {url}")
+        for i, domain in enumerate(sites, start=1):
+            url = "https://" + domain
+            display_site = "https://" + decode_domain(domain)  # для отчёта показываем в читаемом виде
+            print(f"[{i}/{len(sites)}] {display_site}")
+
             try:
-                page.goto(url, timeout=20000, wait_until='domcontentloaded')
+                response = page.goto(url, timeout=20000, wait_until='domcontentloaded')
+
+                # сайт не открылся или отдал ошибку - помечаем как мёртвый и не тратим на него время
+                if response is None or response.status >= 400:
+                    row = {'Сайт': display_site, 'Телефоны': 'Сайт недоступен', 'Email': 'Сайт недоступен'}
+                    append_row(OUTPUT_CSV, row)
+                    print("  -> сайт недоступен")
+                    page.wait_for_timeout(int(pause(1, 3) * 1000))
+                    continue
+
                 page.wait_for_timeout(1500)
-                phone, email = get_contacts(page, url)
-                row = {'Сайт': url, 'Телефон': phone, 'Email': email}
-                print(f"  -> тел: {phone}, email: {email}")
+                phones, email = get_contacts(page, url)
+
+                phones_text = ", ".join(phones) if phones else "Не найден"
+                row = {'Сайт': display_site, 'Телефоны': phones_text, 'Email': email or "Не найден"}
+                print(f"  -> тел: {phones_text}, email: {email or 'Не найден'}")
+
             except Exception:
-                row = {'Сайт': url, 'Телефон': "Ошибка загрузки", 'Email': "Ошибка загрузки"}
+                row = {'Сайт': display_site, 'Телефоны': "Ошибка загрузки", 'Email': "Ошибка загрузки"}
                 print("  -> не открылся")
 
             append_row(OUTPUT_CSV, row)
