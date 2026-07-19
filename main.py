@@ -2,6 +2,7 @@ import csv
 import re
 import random
 import os
+import joblib
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
@@ -19,23 +20,21 @@ window.navigator.permissions.query = (parameters) => (
 );
 """
 
-PROFILE_DIR = "./browser_profile"  # тут будут куки и т.п., чтоб не логиниться каждый раз заново
+PROFILE_DIR = "./browser_profile"  
 
-CITIES = ["минск", "брест", "гродно", "могилев", "витебск", "гомель", "барановичи"]
-# можно добавить остальные, но пока хватает и этих
-# "бобруйск", "барановичи", "пинск", "орша", "мозырь", "солигорск"
+CITIES = ["минск", "брест", "гродно", "могилев", "витебск", "гомель"]
 
 QUERY_TEMPLATES = ["купить цветы {city}"]
-# "доставка цветов {city}", "заказать цветы {city}", "интернет магазин цветов {city}"
 
 SEARCH_QUERIES = [tpl.format(city=c) for c in CITIES for tpl in QUERY_TEMPLATES]
 
-PAGES_PER_QUERY = 2  # больше 1-2 лучше не ставить, капча вылезает быстро
+PAGES_PER_QUERY = 2  
 
 IGNORE_DOMAINS = [
     'yandex', 'google', 'instagram', 'vk.com', 'facebook', 'youtube',
     'by.wildberries', 'ozon', 'kufar.by', 'deal.by', 'tam.by', 'relax.by',
-    '103.by', 'onliner.by', 'telegram', 't.me', 'whatsapp', 'twitter.com'
+    '103.by', 'onliner.by', 'telegram', 't.me', 'whatsapp', 'twitter.com',
+    '2gis', 'tomas.by', 'clever.by' 
 ]
 
 CONTACT_KEYWORDS = ['contact', 'kontakt', 'about', 'o-nas', 'o_nas', 'company']
@@ -47,7 +46,6 @@ OUTPUT_CSV = 'auto_flower_contacts.csv'
 
 
 def pause(a=1.0, b=3.0):
-    # рандомная пауза, иногда специально затягиваем подольше - будто человек отвлекся
     t = random.uniform(a, b)
     if random.random() < 0.15:
         t += random.uniform(2, 5)
@@ -57,7 +55,7 @@ def pause(a=1.0, b=3.0):
 def long_break_needed(i, every=4):
     if i > 0 and i % every == 0:
         t = random.uniform(60, 180)
-        print(f"перерыв на {int(t)} сек, чтоб не спалиться перед яндексом...")
+        print(f"перерыв на {int(t)} сек, чтоб не палиться перед яндексом...")
         return t
     return 0
 
@@ -76,8 +74,6 @@ def act_like_human(page):
 
 
 def decode_domain(domain):
-    # punycode (xn--...) превращаем обратно в читаемый вид, например
-    # xn--c1ac1acci.xn--g1anf0c.xn--90ais -> гродно.розы.бел
     parts = domain.split('.')
     result = []
     for part in parts:
@@ -85,7 +81,7 @@ def decode_domain(domain):
             try:
                 part = part.encode('ascii').decode('idna')
             except Exception:
-                pass  # не смогли раскодировать - оставляем как было
+                pass  
         result.append(part)
     return '.'.join(result)
 
@@ -96,8 +92,6 @@ def collect_links_for_query(page, query):
     for p_num in range(PAGES_PER_QUERY + 1):
         url = f"https://yandex.by/search/?text={query}&p={p_num}"
         try:
-            # ждём только готовности разметки (domcontentloaded), а не полной
-            # загрузки страницы (load) - у яндекса куча фоновых запросов
             page.goto(url, timeout=30000, wait_until='domcontentloaded')
 
             if "smartcaptcha" in page.content().lower() or page.locator('form[action*="checkcaptcha"]').count() > 0:
@@ -116,10 +110,8 @@ def collect_links_for_query(page, query):
                     continue
                 parsed = urlparse(href)
                 domain = parsed.netloc.replace('www.', '').lower()
-                if not domain or any(bad in domain for bad in IGNORE_DOMAINS):
+                if not domain or any(bad in domain for bad in IGNORE_DOMAINS) or domain.endswith('.ru'):
                     continue
-                # в found храним только сам домен, без схемы (http/https) -
-                # так один и тот же сайт не попадёт дважды из-за разных ссылок на него
                 found.add(domain)
 
         except Exception as e:
@@ -131,29 +123,35 @@ def collect_links_for_query(page, query):
 
 
 def normalize_phone(raw):
-    # приводим любой номер к единому виду: 375XXYYYYYYY (12 цифр, без + и пробелов)
     if not raw:
         return None
 
     digits = re.sub(r'\D', '', raw)
-
+    normalized = None
+    
     if digits.startswith('375') and len(digits) == 12:
-        return digits
-
-    if digits.startswith('80') and len(digits) == 11:
-        return '375' + digits[2:]
-
-    if digits.startswith('0') and len(digits) == 10:
-        return '375' + digits[1:]
-
-    if len(digits) == 9:
-        return '375' + digits
-
-    return None  # не похоже на нормальный белорусский номер - пропускаем
+        normalized = digits
+    elif digits.startswith('80') and len(digits) == 11:
+        normalized = '375' + digits[2:]
+    elif digits.startswith('0') and len(digits) == 10:
+        normalized = '375' + digits[1:]
+    elif len(digits) == 9:
+        normalized = '375' + digits
+    if not normalized:
+        return None
+    
+    local_part = normalized[3:]
+    if len(set(local_part)) == 1: 
+        return None
+    if local_part.startswith('0'): 
+        return None
+    if local_part in ("123456789", "987654321", "123450000"): 
+        return None
+    
+    return normalized 
 
 
 def find_all_phones(page):
-    # собираем ВСЕ номера на странице, а не только первый попавшийся
     phones = []
     seen = set()
 
@@ -184,7 +182,6 @@ def find_all_phones(page):
 
 def find_email(page):
     email = None
-
     try:
         mail_links = page.locator('a[href^="mailto:"]').all()
         if mail_links:
@@ -200,7 +197,6 @@ def find_email(page):
                 email = m.group(0).strip()
         except Exception:
             pass
-
     return email
 
 
@@ -243,10 +239,49 @@ def get_contacts(page, base_url):
     return phones, email
 
 
+# Внедрение ML
+def get_site_metadata(page):
+    """Достаем содержимое для использования в модели"""
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+        
+    try:
+        # Ищем мета-тег description
+        desc_element = page.locator('meta[name="description"]')
+        if desc_element.count() > 0:
+            description = desc_element.first.get_attribute("content")
+        else:
+            description = ""
+    except Exception:
+        description = ""
+        
+    # Склеиваем в одну строку, если оба пустые - вернет просто пробел, который мы уберем через strip()
+    full_text = f"{title} {description}".strip()
+    return full_text
+
+
+def predict_if_target(text, model, vectorizer):
+    """Прогоняет текст через обученную модель"""
+    if not text:
+        return 0 # Если текста нет вообще, считаем мусором
+        
+    # Превращаем текст в числа (матрицу)
+    X_vec = vectorizer.transform([text])
+    
+    # Делаем предсказание (вернется список из одного элемента, берем нулевой)
+    prediction = model.predict(X_vec)
+    
+    # Возвращаем 1 или 0
+    return int(prediction[0])
+
+# 
 def append_row(filename, row, header=False):
     mode = 'w' if header else 'a'
     with open(filename, mode=mode, encoding='utf-8-sig', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=['Сайт', 'Телефоны', 'Email'], delimiter=';')
+        # Обновили список полей (добавили Является целевым)
+        w = csv.DictWriter(f, fieldnames=['Сайт', 'Телефоны', 'Email', 'Является целевым'], delimiter=';')
         if header:
             w.writeheader()
         if row is not None:
@@ -254,11 +289,18 @@ def append_row(filename, row, header=False):
 
 
 def main():
+    print("Загрузка ML-модели...")
+    try:
+        model = joblib.load('logistic_regression_model.pkl')
+        vectorizer = joblib.load('tfidf_vectorizer.pkl')
+        print("Модель успешно загружена!")
+    except Exception as e:
+        print(f"Ошибка загрузки файлов модели! Ошибка: {e}")
+        return
+
     sites = set()
 
     with sync_playwright() as p:
-        # постоянный профиль - куки и локальное хранилище сохраняются между запусками,
-        # ведет себя больше как обычный челк, а не голый запуск браузера каждый раз
         context = p.chromium.launch_persistent_context(
             PROFILE_DIR,
             headless=False,
@@ -289,34 +331,43 @@ def main():
             context.close()
             return
 
-        print("этап 2 - собираю телефоны и почты")
+        print("этап 2 - собираю телефоны и почты + проверяю через ML")
         append_row(OUTPUT_CSV, None, header=True)
 
         for i, domain in enumerate(sites, start=1):
             url = "https://" + domain
-            display_site = "https://" + decode_domain(domain)  # для отчёта показываем в читаемом виде
+            display_site = "https://" + decode_domain(domain)  
             print(f"[{i}/{len(sites)}] {display_site}")
 
             try:
                 response = page.goto(url, timeout=20000, wait_until='domcontentloaded')
 
-                # сайт не открылся или отдал ошибку - помечаем как мёртвый и не тратим на него время
                 if response is None or response.status >= 400:
-                    row = {'Сайт': display_site, 'Телефоны': 'Сайт недоступен', 'Email': 'Сайт недоступен'}
+                    row = {'Сайт': display_site, 'Телефоны': 'Сайт недоступен', 'Email': 'Сайт недоступен', 'Является целевым': 0}
                     append_row(OUTPUT_CSV, row)
                     print("  -> сайт недоступен")
                     page.wait_for_timeout(int(pause(1, 3) * 1000))
                     continue
 
                 page.wait_for_timeout(1500)
+                
+                
+                site_text = get_site_metadata(page)
+                is_target = predict_if_target(site_text, model, vectorizer)
+                
                 phones, email = get_contacts(page, url)
 
                 phones_text = ", ".join(phones) if phones else "Не найден"
-                row = {'Сайт': display_site, 'Телефоны': phones_text, 'Email': email or "Не найден"}
-                print(f"  -> тел: {phones_text}, email: {email or 'Не найден'}")
+                row = {
+                    'Сайт': display_site, 
+                    'Телефоны': phones_text, 
+                    'Email': email or "Не найден",
+                    'Является целевым': is_target # записываем результат модели
+                }
+                print(f"  -> тел: {phones_text}, email: {email or 'Не найден'}, ЦЕЛЕВОЙ: {is_target}")
 
-            except Exception:
-                row = {'Сайт': display_site, 'Телефоны': "Ошибка загрузки", 'Email': "Ошибка загрузки"}
+            except Exception as e:
+                row = {'Сайт': display_site, 'Телефоны': "Ошибка загрузки", 'Email': "Ошибка загрузки", 'Является целевым': 0}
                 print("  -> не открылся")
 
             append_row(OUTPUT_CSV, row)

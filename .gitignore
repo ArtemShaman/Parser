@@ -7,4 +7,8 @@ browser_profile/
 
 .idea/
 .vscode/
-
+parser_log.md
+ML_learn.ipynb
+collect_data.py
+logistic_regression_model.pkl
+/Users/artemsaman/Documents/Parcer/tfidf_vectorizer.pkl
